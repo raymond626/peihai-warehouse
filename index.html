@@ -4,9 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>北海企業｜樣品室材料總表</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="supabase-config.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
 <style>
 /* ─── Reset & Base ───────────────────────────────────────────────────── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
@@ -1486,13 +1485,6 @@ table.wh-table .code-cell{
 // PEIHAI WAREHOUSE MANAGEMENT SYSTEM — v2.0
 // ═══════════════════════════════════════════════════════════════════
 
-// ─── Supabase config (same as original supabase-config.js) ──────────
-window.PEIHAI_SUPABASE_CONFIG = {
-  url: "https://gverdzrvvalkmsntqwof.supabase.co",
-  anonKey: "sb_publishable_t2dK2_2SjsPqMFScKTewFA_Iw8zLJEq",
-  allowSignUp: false
-};
-
 // ─── Material taxonomy ──────────────────────────────────────────────
 const MAT = {
   L:{label:'皮類 Leather',      types:{C:'牛 Cow',S:'羊 Sheep',P:'豬 Pig',X:'特 Special'},     specs:{1:'面皮 Full Grain',2:'反毛 Suede',3:'狼皮 Nubuck',4:'八哥 Action',5:'三層 Split',6:'帶毛 Hair-on',7:'貼膜 Laminated',8:'後處理 Treated',9:'內裡 Lining'}},
@@ -1518,6 +1510,10 @@ let currentUser = null;
 let currentRole = 'local';
 let realtimeChannel = null;
 let suppressCloudSave = false;
+let suppressRealtimeUntil = 0;
+let cloudSaveTimer = null;
+let cloudLoadTimer = null;
+const pendingCloudItems = new Map();
 let dataDirectoryHandle = null;
 let scannerStream = null;
 let scannerActive = false;
@@ -1527,6 +1523,11 @@ let pendingDeleteCode = null;
 
 const DB_NAME = 'Peihai_WMS_DB_V26';
 const BACKUP_FILE = 'peihai-inventory-backup.json';
+const LIBS = {
+  qr: 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+  xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+};
+const scriptLoads = {};
 
 // ─── Helpers ────────────────────────────────────────────────────────
 function now() {
@@ -1576,7 +1577,45 @@ function nextSeqForPrefix(prefix, reservedCodes=[]){
 function nextMaterialCode(prefix, colorCode, reservedCodes=[]){
   return prefix+'-'+nextSeqForPrefix(prefix,reservedCodes)+'-'+String(colorCode||'').trim();
 }
-function photoOk(p){ const v=String(p||''); return v && !v.startsWith('sample-images/'); }
+function touchCloudSyncWindow(ms=5000){
+  suppressRealtimeUntil=Math.max(suppressRealtimeUntil,Date.now()+ms);
+}
+function safePhotoSrc(p){
+  const v=String(p||'').trim();
+  if(!v||v.startsWith('sample-images/')) return '';
+  if(/^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(v)) return v.replace(/\s/g,'');
+  try{
+    const u=new URL(v, location.href);
+    if(u.protocol==='https:'||u.origin===location.origin) return u.href;
+  }catch(e){}
+  return '';
+}
+function photoOk(p){ return !!safePhotoSrc(p); }
+function loadScript(src, globalName){
+  if(globalName&&window[globalName]) return Promise.resolve();
+  if(scriptLoads[src]) return scriptLoads[src];
+  scriptLoads[src]=new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src=src;
+    s.async=true;
+    s.onload=()=>{
+      if(globalName&&!window[globalName]){
+        delete scriptLoads[src];
+        reject(new Error(globalName+' 載入失敗'));
+        return;
+      }
+      resolve();
+    };
+    s.onerror=()=>{
+      delete scriptLoads[src];
+      reject(new Error(src+' 載入失敗'));
+    };
+    document.head.appendChild(s);
+  });
+  return scriptLoads[src];
+}
+function ensureQRCode(){ return loadScript(LIBS.qr,'QRCode'); }
+function ensureXLSX(){ return loadScript(LIBS.xlsx,'XLSX'); }
 function getStatus(item){
   if(item.status&&item.status.includes('Pending')) return 'pending';
   if(item.status&&(item.status.includes('耗盡')||item.status.includes('Empty'))) return 'empty';
@@ -1590,9 +1629,10 @@ function statusChip(item){
 }
 function catChip(cat){ return `<span class="chip chip-${cat}">${CAT_LABELS[cat]||cat}</span>`; }
 function thumbCell(item, canClick=true){
-  if(photoOk(item.photo)){
-    const click = canClick ? `onclick="showImgPreview('${item.photo.replace(/'/g,'\\\'')}')"` : '';
-    return `<img class="thumb" src="${item.photo}" alt="照片" ${click}>`;
+  const src=safePhotoSrc(item.photo);
+  if(src){
+    const click = canClick ? 'onclick="showImgPreview(this.src)"' : '';
+    return `<img class="thumb" src="${esc(src)}" alt="照片" ${click}>`;
   }
   return `<div class="thumb-empty" title="無照片">📷</div>`;
 }
@@ -1633,6 +1673,31 @@ function setCloud(msg, state){
   if(b){ b.classList.remove('cloud-ok','cloud-err'); if(state) b.classList.add(state); }
 }
 function setAuthMsg(m){ const el=document.getElementById('authMsg'); if(el) el.textContent=m||''; }
+function isUsefulAuthErrorText(v){
+  const text=String(v||'').trim();
+  return text!==''&&text!=='{}'&&text!=='[]'&&text!=='[object Object]';
+}
+function describeAuthError(error){
+  const parts=[
+    error?.message,
+    error?.error_description,
+    error?.msg,
+    error?.code,
+    error?.error,
+    error?.details,
+    error?.hint,
+    error?.reason,
+    error?.cause?.message
+  ].filter(isUsefulAuthErrorText).map(v=>String(v).trim());
+  const text=parts.join(' / ');
+  if(/invalid login credentials|invalid_credentials/i.test(text)) return 'Email 或密碼不正確，請重新確認。';
+  if(/email not confirmed|email_not_confirmed/i.test(text)) return '此帳號信箱尚未驗證，請先完成信箱驗證。';
+  if(/too many requests|rate limit/i.test(text)) return '登入嘗試太頻繁，請稍後再試。';
+  if(/failed to fetch|network|fetch/i.test(text)) return '連線 Supabase 失敗，請檢查網路或稍後再試。';
+  if(text) return text;
+  if(error?.status) return '帳號不存在、密碼不正確，或此帳號尚未被管理員加入權限名單。請也確認 Email 拼字，例如 warehouse / wearhouse 是否打錯。';
+  return 'Supabase 沒有回傳詳細錯誤，請確認帳號/密碼，或重新整理後再試。';
+}
 function updateAuthUI(){
   const userBadge=document.getElementById('userBadge');
   const logoutBtn=document.getElementById('logoutBtn');
@@ -1669,15 +1734,31 @@ function applyRoleUI(){
   if(cb) cb.style.display=isAd?'':'none';
 }
 async function initSupabase(){
-  const cfg=getSupaCfg();
-  if(!cfg||!window.supabase){ cloudEnabled=false; updateAuthUI(); return; }
-  cloudEnabled=true;
-  supabaseClient=window.supabase.createClient(cfg.url,cfg.anonKey);
-  const rb=document.getElementById('registerBtn');
-  if(rb) rb.style.display=cfg.allowSignUp?'':'none';
-  const {data}=await supabaseClient.auth.getSession();
-  await applySession(data.session||null);
-  supabaseClient.auth.onAuthStateChange((_,s)=>applySession(s||null));
+  try{
+    const cfg=getSupaCfg();
+    if(!cfg){ cloudEnabled=false; updateAuthUI(); return; }
+    if(!window.supabase){
+      cloudEnabled=false;
+      updateAuthUI();
+      setCloud('Supabase 載入失敗','cloud-err');
+      setAuthMsg('Supabase 程式庫尚未載入，請檢查網路後重新整理。');
+      return;
+    }
+    cloudEnabled=true;
+    supabaseClient=window.supabase.createClient(cfg.url,cfg.anonKey);
+    const rb=document.getElementById('registerBtn');
+    if(rb) rb.style.display=cfg.allowSignUp?'':'none';
+    const {data,error}=await supabaseClient.auth.getSession();
+    if(error) console.warn('Supabase session check failed',error);
+    await applySession(data?.session||null);
+    supabaseClient.auth.onAuthStateChange((_,s)=>applySession(s||null));
+  }catch(error){
+    console.error('Supabase init failed',error);
+    cloudEnabled=false;
+    updateAuthUI();
+    setCloud('Supabase 初始化失敗','cloud-err');
+    setAuthMsg('Supabase 初始化失敗：'+describeAuthError(error));
+  }
 }
 async function applySession(session){
   if(!cloudEnabled) return;
@@ -1708,14 +1789,30 @@ async function loadProfile(){
   currentRole='viewer';
 }
 async function loginUser(){
-  if(!supabaseClient){ setAuthMsg('Supabase 尚未設定'); return; }
+  if(!supabaseClient){
+    await initSupabase();
+    if(!supabaseClient){ setAuthMsg('Supabase 尚未設定或尚未載入，請重新整理後再試。'); return; }
+  }
   const email=document.getElementById('authEmail').value.trim();
   const pwd=document.getElementById('authPassword').value;
   if(!email||!pwd){ setAuthMsg('請輸入 Email 與密碼'); return; }
   setAuthMsg('登入中…');
-  const {error}=await supabaseClient.auth.signInWithPassword({email,password:pwd});
-  if(error){ setAuthMsg('登入失敗：'+error.message); return; }
-  setAuthMsg('');
+  try{
+    const {data,error}=await supabaseClient.auth.signInWithPassword({email,password:pwd});
+    if(error){
+      console.warn('Login failed',error);
+      setAuthMsg('登入失敗：'+describeAuthError(error));
+      return;
+    }
+    if(!data?.session&&!data?.user){
+      setAuthMsg('登入失敗：Supabase 沒有回傳登入階段，請稍後再試。');
+      return;
+    }
+    setAuthMsg('登入成功，同步資料中…');
+  }catch(error){
+    console.error('Login crashed',error);
+    setAuthMsg('登入失敗：'+describeAuthError(error));
+  }
 }
 async function registerUser(){
   if(!supabaseClient) return;
@@ -1724,9 +1821,14 @@ async function registerUser(){
   if(!email||!pwd){ setAuthMsg('請輸入 Email 與密碼'); return; }
   if(pwd.length<6){ setAuthMsg('密碼至少 6 碼'); return; }
   setAuthMsg('建立中…');
-  const {error}=await supabaseClient.auth.signUp({email,password:pwd});
-  if(error){ setAuthMsg('建立失敗：'+error.message); return; }
-  setAuthMsg('帳號已建立，請確認信箱後登入。');
+  try{
+    const {error}=await supabaseClient.auth.signUp({email,password:pwd});
+    if(error){ setAuthMsg('建立失敗：'+describeAuthError(error)); return; }
+    setAuthMsg('帳號已建立，請確認信箱後登入。');
+  }catch(error){
+    console.error('Register crashed',error);
+    setAuthMsg('建立失敗：'+describeAuthError(error));
+  }
 }
 async function logoutUser(){
   if(supabaseClient) await supabaseClient.auth.signOut();
@@ -1734,6 +1836,7 @@ async function logoutUser(){
 }
 async function loadCloud(showAlert){
   if(!supabaseClient||!currentUser) return;
+  if(cloudLoadTimer){ clearTimeout(cloudLoadTimer); cloudLoadTimer=null; }
   const {data,error}=await supabaseClient.from('materials').select('code,data,updated_at').order('updated_at',{ascending:false});
   if(error){ setCloud('雲端讀取失敗','cloud-err'); if(showAlert) alert('雲端讀取失敗'); return; }
   inventory=(data||[]).map(r=>r.data).filter(Boolean);
@@ -1741,23 +1844,80 @@ async function loadCloud(showAlert){
   if(db) replaceInDB(inventory,()=>renderAll(),false);
   else renderAll();
 }
+function scheduleCloudReload(){
+  if(Date.now()<suppressRealtimeUntil) return;
+  if(cloudLoadTimer) clearTimeout(cloudLoadTimer);
+  cloudLoadTimer=setTimeout(()=>loadCloud(false),700);
+}
 function subscribeCloud(){
   if(!supabaseClient||!currentUser||realtimeChannel) return;
   realtimeChannel=supabaseClient.channel('mat-rt')
-    .on('postgres_changes',{event:'*',schema:'public',table:'materials'},()=>loadCloud(false))
+    .on('postgres_changes',{event:'*',schema:'public',table:'materials'},()=>scheduleCloudReload())
     .subscribe();
 }
-async function saveItemCloud(item){
-  if(!cloudEnabled||!supabaseClient||!currentUser||suppressCloudSave) return;
+function queueCloudSave(item){
+  if(!cloudEnabled||!supabaseClient||!currentUser||suppressCloudSave||!item?.code) return true;
+  pendingCloudItems.set(item.code,item);
+  if(cloudSaveTimer) clearTimeout(cloudSaveTimer);
+  cloudSaveTimer=setTimeout(()=>flushCloudSaves(),900);
+  setCloud('雲端同步排程中','cloud-ok');
+  return true;
+}
+async function flushCloudSaves(){
+  if(cloudSaveTimer){ clearTimeout(cloudSaveTimer); cloudSaveTimer=null; }
+  if(!pendingCloudItems.size) return true;
+  const items=Array.from(pendingCloudItems.values());
+  pendingCloudItems.clear();
+  return saveItemsCloud(items);
+}
+async function saveItemsCloud(items){
+  if(!cloudEnabled||!supabaseClient||!currentUser||suppressCloudSave) return true;
+  const clean=(Array.isArray(items)?items:[items]).filter(item=>item&&item.code);
+  if(!clean.length) return true;
   // permission checked by Supabase RLS
-  const {error}=await supabaseClient.from('materials').upsert({code:item.code,data:item,updated_by:currentUser.id,updated_at:new Date().toISOString()},{onConflict:'code'});
-  if(error) setCloud('雲端儲存失敗','cloud-err');
+  setCloud('雲端同步中','cloud-ok');
+  touchCloudSyncWindow(Math.max(5000,clean.length*120));
+  const rows=clean.map(item=>({code:item.code,data:item,updated_by:currentUser.id,updated_at:new Date().toISOString()}));
+  const {error}=await supabaseClient.from('materials').upsert(rows,{onConflict:'code'});
+  if(error){
+    clean.forEach(item=>pendingCloudItems.set(item.code,item));
+    setCloud('雲端儲存失敗','cloud-err');
+    return false;
+  }
+  setCloud('雲端同步完成','cloud-ok');
+  return true;
+}
+async function saveItemCloud(item, immediate=false){
+  if(immediate) return saveItemsCloud([item]);
+  return queueCloudSave(item);
 }
 async function saveAllCloud(){
   if(!cloudEnabled||!supabaseClient||!currentUser||!isAdmin()) return;
+  if(cloudSaveTimer){ clearTimeout(cloudSaveTimer); cloudSaveTimer=null; }
+  pendingCloudItems.clear();
   const rows=inventory.map(item=>({code:item.code,data:item,updated_by:currentUser.id,updated_at:new Date().toISOString()}));
-  const {error}=await supabaseClient.from('materials').upsert(rows,{onConflict:'code'});
-  if(error) alert('匯入雲端失敗');
+  if(!rows.length) return;
+  setCloud('雲端整批同步中','cloud-ok');
+  touchCloudSyncWindow(Math.max(8000,rows.length*160));
+  const chunkSize=100;
+  for(let i=0;i<rows.length;i+=chunkSize){
+    const {error}=await supabaseClient.from('materials').upsert(rows.slice(i,i+chunkSize),{onConflict:'code'});
+    if(error){ setCloud('雲端儲存失敗','cloud-err'); alert('匯入雲端失敗'); return; }
+  }
+  setCloud('雲端同步完成','cloud-ok');
+}
+async function deleteMaterialsCloud(codes){
+  if(!cloudEnabled||!supabaseClient||!currentUser) return true;
+  const list=Array.isArray(codes)?codes.filter(Boolean):[codes].filter(Boolean);
+  if(!list.length) return true;
+  touchCloudSyncWindow(Math.max(5000,list.length*120));
+  const {error}=await supabaseClient.from('materials').delete().in('code',list);
+  if(error){
+    setCloud('雲端刪除失敗','cloud-err');
+    alert('雲端刪除失敗：'+error.message);
+    return false;
+  }
+  return true;
 }
 
 // ─── IndexedDB ──────────────────────────────────────────────────────
@@ -1919,20 +2079,55 @@ function buildSKUPreview(){
 }
 
 // ─── Photo upload ─────────────────────────────────────────────────────
-function handlePhotoUpload(event, previewId, hiddenId){
+function readFileAsDataURL(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=e=>resolve(e.target.result);
+    reader.onerror=()=>reject(new Error('圖片讀取失敗'));
+    reader.readAsDataURL(file);
+  });
+}
+function loadImageElement(src){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>resolve(img);
+    img.onerror=()=>reject(new Error('圖片載入失敗'));
+    img.src=src;
+  });
+}
+async function compressPhoto(file){
+  if(!file.type.startsWith('image/')) throw new Error('請選擇圖片檔');
+  if(file.type==='image/svg+xml') throw new Error('不支援 SVG 圖片');
+  const original=await readFileAsDataURL(file);
+  if(file.size<=350000) return original;
+  const img=await loadImageElement(original);
+  const maxSide=1200;
+  const scale=Math.min(1,maxSide/Math.max(img.width,img.height));
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.max(1,Math.round(img.width*scale));
+  canvas.height=Math.max(1,Math.round(img.height*scale));
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img,0,0,canvas.width,canvas.height);
+  return canvas.toDataURL('image/jpeg',0.72);
+}
+async function handlePhotoUpload(event, previewId, hiddenId){
   const file=event.target.files[0]; if(!file) return;
-  const reader=new FileReader();
-  reader.onload=e=>{
+  try{
+    const dataUrl=await compressPhoto(file);
     const img=document.getElementById(previewId);
     const hid=document.getElementById(hiddenId);
-    if(img){ img.src=e.target.result; img.style.display='block'; }
-    if(hid) hid.value=e.target.result;
-  };
-  reader.readAsDataURL(file);
+    if(img){ img.src=dataUrl; img.style.display='block'; }
+    if(hid) hid.value=dataUrl;
+  }catch(e){
+    alert(e.message||'圖片處理失敗，請換一張照片再試');
+  }
 }
 function showImgPreview(src){
-  if(!src) return;
-  document.getElementById('imgPreviewImg').src=src;
+  const safeSrc=safePhotoSrc(src);
+  if(!safeSrc) return;
+  document.getElementById('imgPreviewImg').src=safeSrc;
   document.getElementById('imgPreviewBackdrop').classList.add('open');
 }
 function closeImgPreview(){ document.getElementById('imgPreviewBackdrop').classList.remove('open'); }
@@ -2069,6 +2264,7 @@ function createMaterial(){
     saveItemDB(item);
     createdCodes.push(finalCode);
   });
+  flushCloudSaves();
   renderAll();
   ['fColor','fColorName','fName','photoBase64','fThickness','fContact','fPhone','fOrigin','fMoq','fPrice'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('photoPreview').style.display='none';
@@ -2184,17 +2380,30 @@ function openDetail(code){
   document.getElementById('detailTitle').textContent=item.code;
   // Photo
   const photoEl=document.getElementById('detailPhoto');
-  if(photoOk(item.photo)){
+  const photoSrc=safePhotoSrc(item.photo);
+  photoEl.innerHTML='';
+  if(photoSrc){
     photoEl.className='detail-main-photo';
-    photoEl.innerHTML=`<img src="${item.photo}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;cursor:zoom-in;" onclick="showImgPreview('${item.photo.replace(/'/g,"\\'")}')">`;
+    const img=new Image();
+    img.src=photoSrc;
+    img.alt='照片';
+    img.style.cssText='width:100%;height:100%;object-fit:cover;border-radius:inherit;cursor:zoom-in;';
+    img.onclick=()=>showImgPreview(img.src);
+    photoEl.appendChild(img);
   } else {
     photoEl.className='detail-main-photo empty';
     photoEl.textContent='📷';
   }
   // QR
   const qrEl=document.getElementById('detailQR');
-  qrEl.innerHTML='';
-  if(window.QRCode) new QRCode(qrEl,{text:item.code,width:120,height:120,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});
+  qrEl.textContent='QR 載入中…';
+  ensureQRCode().then(()=>{
+    if(currentDetailCode!==code) return;
+    qrEl.innerHTML='';
+    new QRCode(qrEl,{text:item.code,width:120,height:120,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});
+  }).catch(()=>{
+    qrEl.textContent='QR 載入失敗';
+  });
   // Info
   const sizeDisp=getOutsoleSize(item);
   const locDisp=item.locationCode?`${item.locationName} (${item.locationCode})`:'未入庫';
@@ -2260,18 +2469,18 @@ function updateBatchDeleteBar(){
     document.getElementById('batchDeleteCount').textContent='已選 '+selected+' 筆';
   }
 }
-function batchDelete(){
+async function batchDelete(){
   const codes=Array.from(document.querySelectorAll('.mg-chk:checked')).map(c=>c.value);
   if(!codes.length){ alert('請先勾選要刪除的材料'); return; }
   if(!confirm('⚠️ 確定要刪除 '+codes.length+' 筆材料嗎？\n\n此操作無法復原！')) return;
   const confirmText=prompt('請輸入 DELETE 確認刪除 '+codes.length+' 筆：');
   if(confirmText!=='DELETE'){ alert('已取消'); return; }
+  saveSafetyBackup('批量刪除前');
+  const cloudOk=await deleteMaterialsCloud(codes);
+  if(!cloudOk) return;
   codes.forEach(code=>{
     inventory=inventory.filter(i=>i.code!==code);
     deleteItemDB(code);
-    if(cloudEnabled&&supabaseClient&&currentUser){
-      supabaseClient.from('materials').delete().eq('code',code);
-    }
   });
   renderAll();
   alert('✅ 已刪除 '+codes.length+' 筆材料');
@@ -2282,9 +2491,15 @@ document.addEventListener('change',function(e){
 });
 
 // ─── Excel batch import ──────────────────────────────────────────────
-function importExcel(event){
+async function importExcel(event){
   const file=event.target.files?.[0]; event.target.value='';
   if(!file) return;
+  try{
+    await ensureXLSX();
+  }catch(err){
+    alert('Excel 功能載入失敗，請檢查網路後再試');
+    return;
+  }
   const reader=new FileReader();
   reader.onload=function(e){
     try{
@@ -2362,6 +2577,7 @@ function importExcel(event){
         created++;
       });
       renderAll();
+      flushCloudSaves();
       alert('✅ Excel 匯入完成！\n\n成功：'+created+' 筆\n跳過：'+skipped+' 筆（缺少名稱或顏色編碼）');
     }catch(err){
       console.error(err);
@@ -2463,6 +2679,7 @@ function submitBatchInbound(){
     item.logs.push({time:t,action:'批量入庫 Batch In',amount:'+'+c.qty.toFixed(1),reason:'批量入庫 主倉'+wh+' 第'+grid+'格',balance:newQty,type:'in'});
     saveItemDB(item);
   });
+  flushCloudSaves();
   alert('✅ 批量入庫成功！共 '+batchInboundCart.length+' 筆');
   batchInboundCart=[];
   renderBatchInbound();
@@ -2534,7 +2751,8 @@ function openEdit(code){
   document.getElementById('editNote').value=item.note||'';
   document.getElementById('editPhotoBase64').value='';
   const preview=document.getElementById('editPhotoPreview');
-  if(photoOk(item.photo)){ preview.src=item.photo; preview.style.display='block'; }
+  const photoSrc=safePhotoSrc(item.photo);
+  if(photoSrc){ preview.src=photoSrc; preview.style.display='block'; }
   else{ preview.style.display='none'; }
   document.getElementById('editBackdrop').classList.add('open');
 }
@@ -2585,22 +2803,24 @@ function promptDelete(code){
 async function confirmDelete(){
   if(!pendingDeleteCode) return;
   const code=pendingDeleteCode;
+  saveSafetyBackup('刪除材料前');
+  const cloudOk=await deleteMaterialsCloud([code]);
+  if(!cloudOk) return;
   inventory=inventory.filter(i=>i.code!==code);
   deleteItemDB(code);
-  if(cloudEnabled&&supabaseClient&&currentUser){
-    await supabaseClient.from('materials').delete().eq('code',code);
-  }
   document.getElementById('deleteBackdrop').classList.remove('open');
   pendingDeleteCode=null;
   renderAll();
 }
 
 // ─── Print label ──────────────────────────────────────────────────────
-function printLabel(){
+async function printLabel(){
   const item=inventory.find(i=>i.code===currentDetailCode); if(!item) return;
-  const qrCanvas=document.querySelector('#detailQR canvas');
-  const qrImg=qrCanvas?qrCanvas.toDataURL():'';
   const w=window.open('','_blank','width=500,height=560');
+  if(!w){ alert('請允許彈出視窗後再列印'); return; }
+  try{ await ensureQRCode(); }catch(e){ alert('QR 功能載入失敗，請檢查網路後再試'); w.close(); return; }
+  const qrCanvas=document.querySelector('#detailQR canvas');
+  const qrImg=qrCanvas?qrCanvas.toDataURL():createQRData(item.code);
   w.document.write(`<html><head><title>${item.code}</title><style>
     body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:16px;font-size:13px;}
     .card{border:2px solid #000;border-radius:8px;padding:14px;max-width:320px;}
@@ -2637,10 +2857,13 @@ function togglePrintSel(checked){
   document.querySelectorAll('.print-chk').forEach(c=>c.checked=checked);
   const sa=document.getElementById('ovSelectAll'); if(sa) sa.checked=checked;
 }
-function printSelectedQR(){
+async function printSelectedQR(){
   const codes=Array.from(document.querySelectorAll('.print-chk:checked')).map(c=>c.value);
   if(!codes.length){ alert('請先勾選要列印 QR Code 的材料'); return; }
   const items=codes.map(c=>inventory.find(i=>i.code===c)).filter(Boolean);
+  const w=window.open('','_blank','width=900,height=700');
+  if(!w){ alert('請允許彈出視窗後再列印'); return; }
+  try{ await ensureQRCode(); }catch(e){ alert('QR 功能載入失敗，請檢查網路後再試'); w.close(); return; }
   const labels=items.map(item=>{
     const qr=createQRData(item.code);
     return `<div class="label">
@@ -2655,7 +2878,6 @@ function printSelectedQR(){
       ${qr?`<img src="${qr}" alt="QR">`:''}
     </div>`;
   }).join('');
-  const w=window.open('','_blank','width=900,height=700');
   w.document.write(`<html><head><title>批量 QR 列印</title><style>
     body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:12px;}
     .sheet{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
@@ -2775,6 +2997,7 @@ function submitBatch(){
     item.logs.push({time:t,action:'批量出庫 Batch Out',amount:'-'+parseFloat(c.outQty).toFixed(1),reason,balance:newQty,type:'batch-out'});
     saveItemDB(item);
   });
+  flushCloudSaves();
   alert('✅ 批量出庫成功！');
   batchCart=[]; document.getElementById('batchReason').value='';
   renderBatch(); renderAll(); switchPage('overview');
@@ -3049,6 +3272,12 @@ function setStorageStatus(msg){ const el=document.getElementById('storageStatus'
 function createBackup(){
   return JSON.stringify({app:'Peihai WMS',version:2,exportedAt:new Date().toISOString(),inventory,brands:customBrands},null,2);
 }
+function saveSafetyBackup(reason){
+  try{
+    localStorage.setItem('peihai_last_safety_backup',createBackup());
+    localStorage.setItem('peihai_last_safety_backup_reason',(reason||'自動備份')+' · '+now());
+  }catch(e){}
+}
 async function chooseFolder(){
   if(!window.showDirectoryPicker){ alert('此瀏覽器不支援資料夾選取，請用下載 / 匯入備份'); return; }
   try{ dataDirectoryHandle=await window.showDirectoryPicker({mode:'readwrite'}); setStorageStatus('已選擇資料夾'); }
@@ -3094,6 +3323,7 @@ async function importText(text, name){
     const next=Array.isArray(p)?p:p.inventory;
     if(!Array.isArray(next)){ alert('不是正確的備份檔格式'); return; }
     if(!confirm('匯入後會取代目前所有材料資料，確定繼續嗎？')) return;
+    saveSafetyBackup('匯入前');
     inventory=next.map(i=>({...i,logs:Array.isArray(i.logs)?i.logs:[],timestamp:i.timestamp||Date.now(),qty:i.qty===undefined?'0.0':String(i.qty)}));
     inventory.sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
     if(p.brands) { customBrands=p.brands; localStorage.setItem('peihai_brands',JSON.stringify(customBrands)); renderBrands(); }
@@ -3108,13 +3338,15 @@ async function clearAllData(){
   const code2=prompt('請輸入 "CLEAR" 確認清除：');
   if(code2!=='CLEAR'){ alert('已取消'); return; }
   try{
-    db.transaction(['inventory'],'readwrite').objectStore('inventory').clear();
+    saveSafetyBackup('清除全部前');
     if(cloudEnabled&&supabaseClient&&currentUser){
-      await supabaseClient.from('materials').delete().neq('code','');
+      const {error}=await supabaseClient.from('materials').delete().neq('code','');
+      if(error){ setCloud('雲端清除失敗','cloud-err'); alert('雲端清除失敗：'+error.message); return; }
     }
+    if(db) db.transaction(['inventory'],'readwrite').objectStore('inventory').clear();
     localStorage.setItem('peihai_ex','1');
     inventory=[]; renderAll();
-  }catch(e){ console.error(e); }
+  }catch(e){ console.error(e); alert('清除失敗，請重新整理後再試'); }
 }
 
 // ─── Example data ─────────────────────────────────────────────────────
