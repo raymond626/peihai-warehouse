@@ -1046,6 +1046,7 @@ table.wh-table .code-cell{
           <button class="btn btn-sm" onclick="chooseFolder()">選擇資料夾</button>
           <button class="btn btn-sm" onclick="saveToFolder()">儲存</button>
           <button class="btn btn-sm" onclick="loadFromFolder()">載入</button>
+          <button class="btn btn-sm" onclick="compressExistingPhotos()">壓縮照片</button>
           <button class="btn btn-sm" onclick="downloadBackup()">下載備份</button>
           <button class="btn btn-sm" onclick="document.getElementById('importInput').click()">匯入備份</button>
           <input type="file" id="importInput" accept=".json" style="display:none;" onchange="importBackup(event)">
@@ -2095,22 +2096,63 @@ function loadImageElement(src){
     img.src=src;
   });
 }
+const PHOTO_MAX_SIDE=800;
+const PHOTO_TARGET_BYTES=180000;
+const PHOTO_MIN_SAVING_BYTES=2048;
+const PHOTO_SYNC_CHUNK=10;
+const PHOTO_QUALITY_STEPS=[0.62,0.56,0.50,0.44,0.38,0.32];
+function dataUrlBytes(dataUrl){
+  const body=String(dataUrl||'').split(',')[1]||'';
+  return Math.ceil(body.replace(/\s/g,'').length*3/4);
+}
+function formatPhotoBytes(bytes){
+  if(bytes>=1048576) return (bytes/1048576).toFixed(1)+' MB';
+  return Math.max(1,Math.round(bytes/1024))+' KB';
+}
+function isStoredDataPhoto(src){
+  return /^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(String(src||'').trim());
+}
+function isDataPhoto(src){
+  return /^data:image\/(?!svg\+xml)[a-z0-9.+-]+;base64,/i.test(String(src||'').trim());
+}
+function drawPhotoToCanvas(img){
+  const width=img.naturalWidth||img.width||1;
+  const height=img.naturalHeight||img.height||1;
+  const scale=Math.min(1,PHOTO_MAX_SIDE/Math.max(width,height));
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.max(1,Math.round(width*scale));
+  canvas.height=Math.max(1,Math.round(height*scale));
+  const ctx=canvas.getContext('2d');
+  if(!ctx) throw new Error('圖片處理失敗');
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img,0,0,canvas.width,canvas.height);
+  return canvas;
+}
+async function compressPhotoDataUrl(src){
+  const safeSrc=String(src||'').trim().replace(/\s/g,'');
+  if(!isDataPhoto(safeSrc)) throw new Error('圖片格式不支援壓縮');
+  const originalBytes=dataUrlBytes(safeSrc);
+  const img=await loadImageElement(safeSrc);
+  const width=img.naturalWidth||img.width||1;
+  const height=img.naturalHeight||img.height||1;
+  if(Math.max(width,height)<=PHOTO_MAX_SIDE && originalBytes<=PHOTO_TARGET_BYTES) return safeSrc;
+  const canvas=drawPhotoToCanvas(img);
+  let best='';
+  let bestBytes=Infinity;
+  for(const quality of PHOTO_QUALITY_STEPS){
+    const next=canvas.toDataURL('image/jpeg',quality);
+    const nextBytes=dataUrlBytes(next);
+    if(nextBytes<bestBytes){ best=next; bestBytes=nextBytes; }
+    if(nextBytes<=PHOTO_TARGET_BYTES) return next;
+  }
+  return best||safeSrc;
+}
 async function compressPhoto(file){
   if(!file.type.startsWith('image/')) throw new Error('請選擇圖片檔');
   if(file.type==='image/svg+xml') throw new Error('不支援 SVG 圖片');
   const original=await readFileAsDataURL(file);
-  if(file.size<=350000) return original;
-  const img=await loadImageElement(original);
-  const maxSide=1200;
-  const scale=Math.min(1,maxSide/Math.max(img.width,img.height));
-  const canvas=document.createElement('canvas');
-  canvas.width=Math.max(1,Math.round(img.width*scale));
-  canvas.height=Math.max(1,Math.round(img.height*scale));
-  const ctx=canvas.getContext('2d');
-  ctx.fillStyle='#fff';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.drawImage(img,0,0,canvas.width,canvas.height);
-  return canvas.toDataURL('image/jpeg',0.72);
+  return compressPhotoDataUrl(original);
 }
 async function handlePhotoUpload(event, previewId, hiddenId){
   const file=event.target.files[0]; if(!file) return;
@@ -2123,6 +2165,61 @@ async function handlePhotoUpload(event, previewId, hiddenId){
   }catch(e){
     alert(e.message||'圖片處理失敗，請換一張照片再試');
   }
+}
+async function syncCompressedPhotoItems(changedItems){
+  if(!cloudEnabled||!supabaseClient||!currentUser||!isAdmin()) return true;
+  setCloud('照片同步中','cloud-ok');
+  for(let i=0;i<changedItems.length;i+=PHOTO_SYNC_CHUNK){
+    const ok=await saveItemsCloud(changedItems.slice(i,i+PHOTO_SYNC_CHUNK));
+    if(!ok) return false;
+  }
+  setCloud('照片同步完成','cloud-ok');
+  return true;
+}
+async function compressExistingPhotos(){
+  if(!isAdmin()){ alert('只有管理員可以壓縮照片'); return; }
+  const candidates=inventory.filter(item=>isStoredDataPhoto(safePhotoSrc(item.photo)));
+  if(!candidates.length){ alert('目前沒有需要壓縮的照片'); return; }
+  if(!confirm('會壓縮已儲存的 '+candidates.length+' 張照片，壓縮後同步到雲端。要開始嗎？')) return;
+  await flushCloudSaves();
+  setStorageStatus('照片壓縮中…');
+  const changedItems=[];
+  let beforeBytes=0, afterBytes=0, failed=0;
+  for(const item of candidates){
+    const original=safePhotoSrc(item.photo);
+    const originalBytes=dataUrlBytes(original);
+    beforeBytes+=originalBytes;
+    try{
+      const compressed=await compressPhotoDataUrl(original);
+      const compressedBytes=dataUrlBytes(compressed);
+      if(compressedBytes+PHOTO_MIN_SAVING_BYTES<originalBytes){
+        item.photo=compressed;
+        changedItems.push(item);
+        afterBytes+=compressedBytes;
+      }else{
+        afterBytes+=originalBytes;
+      }
+    }catch(e){
+      failed++;
+      afterBytes+=originalBytes;
+      console.warn('Photo compression skipped',item.code,e);
+    }
+  }
+  if(!changedItems.length){
+    setStorageStatus(failed?'照片壓縮完成，部分照片略過':'照片已經夠小');
+    alert(failed?'沒有照片變更，'+failed+' 張照片無法壓縮。':'照片已經夠小，不需要再壓縮。');
+    return;
+  }
+  const savedBytes=Math.max(0,beforeBytes-afterBytes);
+  const finish=async()=>{
+    renderAll();
+    const cloudOk=await syncCompressedPhotoItems(changedItems);
+    const msg='已壓縮 '+changedItems.length+' 張照片，約減少 '+formatPhotoBytes(savedBytes)+(failed?'，'+failed+' 張略過。':'。');
+    setStorageStatus(msg);
+    alert(cloudOk?msg:msg+' 但雲端同步失敗，稍後請再試一次。');
+  };
+  if(db) replaceInDB(inventory,finish,false);
+  else finish();
 }
 function showImgPreview(src){
   const safeSrc=safePhotoSrc(src);
