@@ -354,12 +354,14 @@ async function logoutUser(){
 async function loadCloud(showAlert){
   if(!supabaseClient||!currentUser) return;
   if(cloudLoadTimer){ clearTimeout(cloudLoadTimer); cloudLoadTimer=null; }
+  setCloud('雲端同步中','cloud-ok');
   const {data,error}=await supabaseClient.from('materials').select('code,data,updated_at').order('updated_at',{ascending:false});
   if(error){ setCloud('雲端讀取失敗','cloud-err'); if(showAlert) alert('雲端讀取失敗'); return; }
   inventory=(data||[]).map(r=>r.data).filter(Boolean);
   inventory.sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
   if(db) replaceInDB(inventory,()=>renderAll(),false);
   else renderAll();
+  setCloud('雲端同步完成','cloud-ok');
 }
 function scheduleCloudReload(){
   if(Date.now()<suppressRealtimeUntil) return;
@@ -448,6 +450,10 @@ function loadFromDB(){
   try{
     const tx=db.transaction(['inventory'],'readonly');
     tx.objectStore('inventory').getAll().onsuccess=e=>{
+      if(getSupaCfg()){
+        setCloud('雲端登入確認中','cloud-ok');
+        return;
+      }
       if(cloudEnabled&&currentUser) return;
       inventory=e.target.result||[];
       // Force reload if empty OR if old IMP- codes detected
@@ -1743,7 +1749,23 @@ function renderAnalytics(){
     </tr>`).join('');
 }
 
-function renderAll(){ renderStats(); renderOverview(); renderAnalytics(); renderManageTable(); renderSearch(); renderBatch(); }
+function getActivePage(){
+  const active=document.querySelector('.page.active');
+  if(!active?.id) return 'overview';
+  return active.id.replace(/^page/,'').replace(/^./,c=>c.toLowerCase());
+}
+function renderPage(page){
+  if(page==='overview') renderOverview();
+  else if(page==='search') renderSearch();
+  else if(page==='manage') renderManageTable();
+  else if(page==='analytics') renderAnalytics();
+  else if(page==='batch') renderBatch();
+}
+function renderAll(){
+  renderStats();
+  updateBatchCount();
+  renderPage(getActivePage());
+}
 
 function renderOverview(){
   const q=(document.getElementById('ovSearchInput')?.value||'').toLowerCase();
@@ -1877,6 +1899,7 @@ function switchPage(page){
   const navEl=document.getElementById('nav'+page.charAt(0).toUpperCase()+page.slice(1));
   if(target){ target.style.display='block'; target.classList.add('active'); }
   if(navEl) navEl.classList.add('active');
+  renderPage(page);
   if(page==='batch') document.getElementById('batchInput')?.focus();
 }
 
