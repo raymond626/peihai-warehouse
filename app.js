@@ -623,6 +623,7 @@ const PHOTO_TARGET_BYTES=180000;
 const PHOTO_MIN_SAVING_BYTES=2048;
 const PHOTO_SYNC_CHUNK=10;
 const PHOTO_QUALITY_STEPS=[0.62,0.56,0.50,0.44,0.38,0.32];
+const PHOTO_BUCKET='material-photos';
 function dataUrlBytes(dataUrl){
   const body=String(dataUrl||'').split(',')[1]||'';
   return Math.ceil(body.replace(/\s/g,'').length*3/4);
@@ -675,6 +676,67 @@ async function compressPhoto(file){
   if(file.type==='image/svg+xml') throw new Error('不支援 SVG 圖片');
   const original=await readFileAsDataURL(file);
   return compressPhotoDataUrl(original);
+}
+function canUseStoragePhotos(){
+  return !!(cloudEnabled&&supabaseClient&&currentUser);
+}
+function storageSafeName(v){
+  return String(v||'photo').trim().replace(/[^a-z0-9._-]+/gi,'-').replace(/^-+|-+$/g,'').slice(0,80)||'photo';
+}
+function photoExtFromMime(mime){
+  const type=String(mime||'').toLowerCase();
+  if(type.includes('png')) return 'png';
+  if(type.includes('webp')) return 'webp';
+  if(type.includes('gif')) return 'gif';
+  return 'jpg';
+}
+function dataUrlToBlob(dataUrl){
+  const clean=safePhotoSrc(dataUrl);
+  const match=clean.match(/^data:([^;]+);base64,(.*)$/i);
+  if(!match) throw new Error('圖片格式不支援上傳');
+  const mime=match[1].toLowerCase();
+  const bytes=atob(match[2]);
+  const parts=[];
+  for(let i=0;i<bytes.length;i+=8192){
+    const slice=bytes.slice(i,i+8192);
+    const nums=new Array(slice.length);
+    for(let j=0;j<slice.length;j++) nums[j]=slice.charCodeAt(j);
+    parts.push(new Uint8Array(nums));
+  }
+  return new Blob(parts,{type:mime});
+}
+function storagePhotoPath(code, blob){
+  const ext=photoExtFromMime(blob?.type);
+  const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+  const rand=Math.random().toString(36).slice(2,8);
+  return storageSafeName(code)+'/'+stamp+'-'+rand+'.'+ext;
+}
+async function uploadPhotoToStorage(src, code){
+  let clean=safePhotoSrc(src);
+  if(!clean) return '';
+  if(!isStoredDataPhoto(clean)) return clean;
+  if(!canUseStoragePhotos()) return clean;
+  setCloud('照片上傳中','cloud-ok');
+  try{
+    if(dataUrlBytes(clean)>PHOTO_TARGET_BYTES) clean=await compressPhotoDataUrl(clean);
+    const blob=dataUrlToBlob(clean);
+    const path=storagePhotoPath(code,blob);
+    const bucket=supabaseClient.storage.from(PHOTO_BUCKET);
+    const {error}=await bucket.upload(path,blob,{
+      cacheControl:'31536000',
+      contentType:blob.type||'image/jpeg',
+      upsert:false
+    });
+    if(error) throw error;
+    const {data}=bucket.getPublicUrl(path);
+    if(!data?.publicUrl) throw new Error('照片網址產生失敗');
+    setCloud('照片上傳完成','cloud-ok');
+    return data.publicUrl;
+  }catch(e){
+    console.error('Photo upload failed',e);
+    setCloud('照片上傳失敗','cloud-err');
+    throw e;
+  }
 }
 async function handlePhotoUpload(event, previewId, hiddenId){
   const file=event.target.files[0]; if(!file) return;
@@ -743,6 +805,51 @@ async function compressExistingPhotos(){
   if(db) replaceInDB(inventory,finish,false);
   else finish();
 }
+async function migrateStoredPhotos(){
+  if(!isAdmin()){ alert('只有管理員可以搬移照片'); return; }
+  if(!canUseStoragePhotos()){ alert('請先登入雲端，再搬移照片'); return; }
+  const candidates=inventory.filter(item=>isStoredDataPhoto(safePhotoSrc(item.photo)));
+  if(!candidates.length){ alert('目前沒有需要搬移的照片'); return; }
+  if(!confirm('會把 '+candidates.length+' 張舊照片搬到雲端照片庫，材料資料只保留照片網址。要開始嗎？')) return;
+  await flushCloudSaves();
+  setStorageStatus('照片搬移中…');
+  const changedItems=[];
+  let failed=0;
+  for(let i=0;i<candidates.length;i++){
+    const item=candidates[i];
+    try{
+      setStorageStatus('照片搬移中 '+(i+1)+'/'+candidates.length+'…');
+      const url=await uploadPhotoToStorage(item.photo,item.code);
+      if(url&&!isStoredDataPhoto(url)){
+        item.photo=url;
+        changedItems.push(item);
+      }
+    }catch(e){
+      failed++;
+      console.warn('Photo migration skipped',item.code,e);
+    }
+  }
+  if(!changedItems.length){
+    const msg=failed?'照片搬移失敗，請確認 Storage 權限後再試一次。':'沒有照片需要搬移。';
+    setStorageStatus(msg);
+    alert(msg);
+    return;
+  }
+  const persistLocal=()=>new Promise(resolve=>{
+    if(db) replaceInDB(inventory,()=>resolve(true),false);
+    else resolve(true);
+  });
+  await persistLocal();
+  let cloudOk=true;
+  for(let i=0;i<changedItems.length;i+=PHOTO_SYNC_CHUNK){
+    const ok=await saveItemsCloud(changedItems.slice(i,i+PHOTO_SYNC_CHUNK));
+    if(!ok){ cloudOk=false; break; }
+  }
+  renderAll();
+  const msg='已搬移 '+changedItems.length+' 張照片到雲端照片庫'+(failed?'，'+failed+' 張失敗保留原圖。':'。');
+  setStorageStatus(msg);
+  alert(cloudOk?msg:msg+' 但資料同步尚未完成，系統會稍後再試。');
+}
 function showImgPreview(src){
   const safeSrc=safePhotoSrc(src);
   if(!safeSrc) return;
@@ -788,7 +895,7 @@ function stopCamera(){
 }
 
 // ─── Create material ──────────────────────────────────────────────────
-function createMaterial(){
+async function createMaterial(){
   // permission checked by Supabase RLS
   // Clear previous errors
   document.querySelectorAll('#pageManage input, #pageManage select, #pageManage textarea').forEach(el=>el.classList.remove('field-err'));
@@ -856,6 +963,7 @@ function createMaterial(){
 
   const catMap={L:'皮類 Leather',S:'人造皮 Synthetic',T:'布類 Textile',W:'條狀類 Webbing',A:'副料 Auxiliary',O:'OUTSOLE 大底',H:'五金 Hardware'};
   const createdCodes=[];
+  const newItems=[];
   colors.forEach((clr,ci)=>{
     let finalCode;
     if(cat==='O'){
@@ -873,15 +981,27 @@ function createMaterial(){
       sizeUS:cat==='O'?document.getElementById('sUS').value:'',
       sizeJP:cat==='O'?document.getElementById('sJP').value:'',
       locationCode:'', locationName:'', qty:'0.0', unit,
-      photo:ci===0?photo:'', productName:name, vendor, brand, thickness,
+      photo:'', productName:name, vendor, brand, thickness,
       supplier:{name:vendor, contact, phone, origin, lead:0, moq},
       date:'', status:'待到貨 Pending',
       timestamp:Date.now()-ci,
       logs:[{time:now(), action:'建檔 Created', amount:'+0', reason:'建立材料 '+clr.code+' / '+clr.name+(colors.length>1?' (批量建色 '+(ci+1)+'/'+colors.length+')':''), balance:'0', type:'create'}]
     };
+    newItems.push(item);
+    createdCodes.push(finalCode);
+  });
+  if(!newItems.length){ alert('沒有新增資料，請確認編碼是否重複'); return; }
+  if(photo){
+    try{
+      newItems[0].photo=await uploadPhotoToStorage(photo,newItems[0].code);
+    }catch(e){
+      alert('照片上傳失敗，請稍後再試；材料尚未建檔。');
+      return;
+    }
+  }
+  newItems.forEach(item=>{
     inventory.unshift(item);
     saveItemDB(item);
-    createdCodes.push(finalCode);
   });
   flushCloudSaves();
   renderAll();
@@ -912,7 +1032,7 @@ function openInbound(code){
   document.getElementById('inboundBackdrop').classList.add('open');
 }
 function closeInbound(){ document.getElementById('inboundBackdrop').classList.remove('open'); }
-function submitInbound(){
+async function submitInbound(){
   const code=document.getElementById('ibItemCode').value;
   const item=inventory.find(i=>i.code===code); if(!item) return;
   const qty=parseFloat(document.getElementById('ibQty').value);
@@ -923,13 +1043,22 @@ function submitInbound(){
   if(!qty||qty<=0){ alert('請輸入正確的入庫數量'); return; }
   if(!wh||!rack){ alert('請選擇主倉與格'); return; }
   if(!date){ alert('請選擇入庫日期'); return; }
+  let uploadedPhoto='';
+  if(photo){
+    try{
+      uploadedPhoto=await uploadPhotoToStorage(photo,item.code);
+    }catch(e){
+      alert('照片上傳失敗，入庫尚未儲存，請稍後再試。');
+      return;
+    }
+  }
   const newQty=(parseFloat(item.qty)+qty).toFixed(1);
   item.locationCode=`${wh}-${rack}`;
   item.locationName=`主倉 ${wh} — 第 ${rack} 格`;
   item.qty=newQty;
   item.status='在庫 In';
   if(!item.date) item.date=date;
-  if(photo) item.photo=photo;
+  if(uploadedPhoto) item.photo=uploadedPhoto;
   item.logs.push({time:now(),action:'收料入庫 Receive',amount:'+'+qty.toFixed(1),reason:'倉庫點收進貨',balance:newQty,type:'in'});
   saveItemDB(item); renderAll(); closeInbound();
   alert(`✅ ${item.code} 收料入庫成功！\n入庫：${qty.toFixed(1)} ${item.unit}\n儲位：${item.locationCode}`);
@@ -1376,16 +1505,29 @@ function openEdit(code){
   document.getElementById('editBackdrop').classList.add('open');
 }
 function closeEdit(){ document.getElementById('editBackdrop').classList.remove('open'); }
-function submitEdit(){
+async function submitEdit(){
   const code=document.getElementById('editItemCode').value;
   const item=inventory.find(i=>i.code===code); if(!item) return;
   const name=document.getElementById('editName').value.trim();
   if(!name){ alert('請填寫材料名稱'); return; }
   const newCode=document.getElementById('editCode').value.trim();
-  if(newCode && newCode!==item.code){
-    // Check for duplicates
+  const willRename=newCode && newCode!==item.code;
+  if(willRename){
     if(inventory.some(i=>i.code===newCode)){ alert('此編碼已被使用，請換一個'); return; }
-    // Update code in DB
+  }
+  const newPhoto=document.getElementById('editPhotoBase64').value;
+  let uploadedPhoto='';
+  if(newPhoto){
+    try{
+      uploadedPhoto=await uploadPhotoToStorage(newPhoto,newCode||item.code);
+    }catch(e){
+      alert('照片上傳失敗，變更尚未儲存，請稍後再試。');
+      return;
+    }
+  }
+  if(willRename){
+    const cloudDeleted=await deleteMaterialsCloud([item.code]);
+    if(!cloudDeleted) return;
     deleteItemDB(item.code);
     item.code=newCode;
   }
@@ -1403,12 +1545,11 @@ function submitEdit(){
   item.supplier.phone=document.getElementById('editPhone').value.trim();
   item.supplier.origin=document.getElementById('editOrigin').value.trim();
   item.supplier.lead=parseInt(document.getElementById('editLead').value)||0;
-  const newPhoto=document.getElementById('editPhotoBase64').value;
-  if(newPhoto) item.photo=newPhoto;
+  if(uploadedPhoto) item.photo=uploadedPhoto;
   saveItemDB(item);
   closeEdit();
   renderAll();
-  if(currentDetailCode===code) openDetail(code);
+  if(currentDetailCode===code) openDetail(item.code);
   alert('✅ 已儲存變更');
 }
 
