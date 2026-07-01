@@ -372,6 +372,12 @@ table.wh-table .code-cell{
 }
 .storage-bar .storage-status{font-weight:600;color:var(--text2);}
 .storage-bar .btn{flex-shrink:0;}
+.storage-bar button[onclick="compressExistingPhotos()"],
+.storage-bar button[onclick="migrateStoredPhotos()"],
+.storage-bar button[onclick="loadExamples()"]{
+  display:none!important;
+}
+
 
 /* ─── Modal ──────────────────────────────────────────────────────────── */
 .modal-backdrop{
