@@ -324,7 +324,7 @@ table.wh-table .code-cell{
   background:var(--surface);
   border:1px solid var(--border);
   border-radius:var(--radius-lg);
-  overflow:hidden;
+  overflow:hidden;380
   position:sticky;top:calc(var(--header-h) + var(--nav-h) + 16px);
   max-height:calc(100vh - var(--header-h) - var(--nav-h) - 32px);
   display:flex;flex-direction:column;
@@ -627,7 +627,7 @@ table.wh-table .code-cell{
   .detail-main-photo{width:100px;height:100px;}
 
   .modal-box{width:95vw;margin:10px auto;}
-  .modal-box.modal-xl{width:95vw;}
+  .modal-box.modal-xl{width:95v
   .modal-body{padding:14px;}
   .row2,.row3{grid-template-columns:1fr;}
   .bulk-add-grid{grid-template-columns:1fr;}
@@ -650,4 +650,10 @@ table.wh-table .code-cell{
   .nav-item{font-size:11px;padding:0 7px;height:30px;}
   .nav-count{display:none;}
   table.wh-table th:nth-child(n+5),table.wh-table td:nth-child(n+5){display:none;}
+}
+
+
+/* Hide retired import utilities */
+.storage-bar button[onclick="loadExcelImport()"]{
+  display:none!important;
 }
