@@ -40,6 +40,7 @@ let pendingDeleteCode = null;
 
 const DB_NAME = 'Peihai_WMS_DB_V26';
 const BACKUP_FILE = 'peihai-inventory-backup.json';
+const PHOTO_PLACEHOLDER='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 const LIBS = {
   qr: 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
   xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
@@ -145,11 +146,42 @@ function statusChip(item){
   return '<span class="chip chip-in">在庫</span>';
 }
 function catChip(cat){ return `<span class="chip chip-${cat}">${CAT_LABELS[cat]||cat}</span>`; }
+let photoLazyObserver = null;
+function loadLazyPhoto(img){
+  const src=img?.dataset?.src;
+  if(!src) return;
+  img.src=src;
+  img.removeAttribute('data-src');
+  img.classList.remove('photo-lazy');
+}
+function getPhotoLazyObserver(){
+  if(!('IntersectionObserver' in window)) return null;
+  if(!photoLazyObserver){
+    photoLazyObserver=new IntersectionObserver(entries=>{
+      entries.forEach(entry=>{
+        if(!entry.isIntersecting) return;
+        const img=entry.target;
+        photoLazyObserver.unobserve(img);
+        loadLazyPhoto(img);
+      });
+    },{rootMargin:'240px 0px',threshold:0.01});
+  }
+  return photoLazyObserver;
+}
+function activateLazyPhotos(root=document){
+  const imgs=Array.from((root||document).querySelectorAll('img.photo-lazy[data-src]'));
+  if(!imgs.length) return;
+  const observer=getPhotoLazyObserver();
+  imgs.forEach(img=>{
+    if(observer) observer.observe(img);
+    else loadLazyPhoto(img);
+  });
+}
 function thumbCell(item, canClick=true){
   const src=safePhotoSrc(item.photo);
   if(src){
-    const click = canClick ? 'onclick="showImgPreview(this.src)"' : '';
-    return `<img class="thumb" src="${esc(src)}" alt="照片" ${click}>`;
+    const click = canClick ? 'onclick="showImgPreview(this.dataset.src||this.src)"' : '';
+    return `<img class="thumb photo-lazy" src="${PHOTO_PLACEHOLDER}" data-src="${esc(src)}" alt="照片" loading="lazy" decoding="async" fetchpriority="low" ${click}>`;
   }
   return `<div class="thumb-empty" title="無照片">📷</div>`;
 }
@@ -1740,6 +1772,7 @@ function renderBatch(){
       <td><button class="btn btn-sm btn-danger" onclick="removeFromBatch('${esc(c.code)}')">移除</button></td>
     </tr>`;
   }).join('');
+  activateLazyPhotos(tbody);
 }
 function submitBatch(){
   // permission checked by Supabase RLS
@@ -1932,6 +1965,7 @@ function renderOverview(){
     <td>${statusChip(item)}</td>
     <td><button class="btn btn-sm" onclick="openEdit('${esc(item.code)}')">編輯</button></td>
   </tr>`).join('');
+  activateLazyPhotos(tbody);
 }
 
 function renderManageTable(){
@@ -1965,6 +1999,7 @@ function renderManageTable(){
       </td>
     </tr>`;
   }).join('');
+  activateLazyPhotos(tbody);
 }
 
 function renderSearch(){
@@ -1992,6 +2027,7 @@ function renderSearch(){
     <td>${statusChip(item)}</td>
     <td><button class="btn btn-sm" onclick="openEdit('${esc(item.code)}')">編輯</button></td>
   </tr>`).join('');
+  activateLazyPhotos(tbody);
 }
 
 function printSearchResult(){
