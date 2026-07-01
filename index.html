@@ -6,7 +6,7 @@
 <title>北海企業｜樣品室材料總表</title>
 <script src="supabase-config.js?v=20260701-5"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260701-5">
+<link rel="stylesheet" href="styles.css?v=20260701-6">
 <link rel="icon" href="data:,">
 </head>
 <body>
@@ -399,16 +399,12 @@
           <button class="btn btn-sm" onclick="chooseFolder()">選擇資料夾</button>
           <button class="btn btn-sm" onclick="saveToFolder()">儲存</button>
           <button class="btn btn-sm" onclick="loadFromFolder()">載入</button>
-          <button class="btn btn-sm" onclick="compressExistingPhotos()">壓縮照片</button>
-          <button class="btn btn-sm" onclick="migrateStoredPhotos()">搬移照片</button>
           <button class="btn btn-sm" onclick="downloadBackup()">下載備份</button>
           <button class="btn btn-sm" onclick="document.getElementById('importInput').click()">匯入備份</button>
           <input type="file" id="importInput" accept=".json" style="display:none;" onchange="importBackup(event)">
           <button class="btn btn-sm btn-accent" onclick="document.getElementById('excelImportInput').click()">📥 匯入 Excel</button>
           <input type="file" id="excelImportInput" accept=".xlsx,.xls" style="display:none;" onchange="importExcel(event)">
           <button class="btn btn-sm" onclick="downloadTemplate()">📄 下載模板</button>
-          <button class="btn btn-sm" onclick="loadExamples()">載入範例</button>
-          <button class="btn btn-sm btn-accent" onclick="loadExcelImport()">📥 載入Excel材料</button>
         </div>
 
         <!-- Batch delete bar -->
