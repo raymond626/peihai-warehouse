@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>北海企業｜樣品室材料總表</title>
-<script src="supabase-config.js?v=20260701-3"></script>
+<script src="supabase-config.js?v=20260701-4"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260701-3">
+<link rel="stylesheet" href="styles.css?v=20260701-4">
 <link rel="icon" href="data:,">
 </head>
 <body>
@@ -400,6 +400,7 @@
           <button class="btn btn-sm" onclick="saveToFolder()">儲存</button>
           <button class="btn btn-sm" onclick="loadFromFolder()">載入</button>
           <button class="btn btn-sm" onclick="compressExistingPhotos()">壓縮照片</button>
+          <button class="btn btn-sm" onclick="migrateStoredPhotos()">搬移照片</button>
           <button class="btn btn-sm" onclick="downloadBackup()">下載備份</button>
           <button class="btn btn-sm" onclick="document.getElementById('importInput').click()">匯入備份</button>
           <input type="file" id="importInput" accept=".json" style="display:none;" onchange="importBackup(event)">
@@ -834,7 +835,7 @@
 </div>
 
 
-<script src="excel-import-data.js?v=20260701-3"></script>
-<script src="app.js?v=20260701-3"></script>
+<script src="excel-import-data.js?v=20260701-4"></script>
+<script src="app.js?v=20260701-4"></script>
 </body>
 </html>
