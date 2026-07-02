@@ -1271,6 +1271,81 @@ document.addEventListener('change',function(e){
 });
 
 // ─── Excel batch import ──────────────────────────────────────────────
+function pickImportCode(value, allowed){
+  const raw=String(value||'').trim();
+  if(!raw) return '';
+  const upper=raw.toUpperCase();
+  if(allowed&&allowed[upper]) return upper;
+  const first=upper.match(/[A-Z0-9]+/);
+  if(first&&allowed&&allowed[first[0]]) return first[0];
+  if(!allowed) return first?first[0]:upper;
+  return '';
+}
+function pickImportCategory(value){
+  const raw=String(value||'').trim();
+  const direct=pickImportCode(raw,MAT);
+  if(direct) return direct;
+  const text=raw.toLowerCase();
+  if(text.includes('皮類')||text.includes('leather')) return 'L';
+  if(text.includes('人造皮')||text.includes('synthetic')) return 'S';
+  if(text.includes('布類')||text.includes('textile')) return 'T';
+  if(text.includes('條狀')||text.includes('織帶')||text.includes('webbing')) return 'W';
+  if(text.includes('副料')||text.includes('auxiliary')) return 'A';
+  if(text.includes('大底')||text.includes('outsole')) return 'O';
+  if(text.includes('五金')||text.includes('hardware')) return 'H';
+  return '';
+}
+function autoClassifyImport(matType){
+  const mt=String(matType||'').toLowerCase();
+  let cat='S',type='M',spec='1';
+  if(mt.includes('反毛')||mt.includes('suede')){ cat='L';type='C';spec='2'; }
+  else if(mt.includes('椰皮')||mt.includes('面皮')){ cat='L';type='C';spec='1'; }
+  else if(mt.includes('皮')&&!mt.includes('人造')&&!mt.includes('pu')){ cat='L';type='C';spec='1'; }
+  else if(mt.includes('超纖')||mt.includes('超件')||mt.includes('仿超')){ cat='S';type='M';spec='1'; }
+  else if(mt.includes('pu')&&mt.includes('濕式')){ cat='S';type='M';spec='2'; }
+  else if(mt.includes('pu')&&mt.includes('霧面')){ cat='S';type='M';spec='3'; }
+  else if(mt.includes('pu')){ cat='S';type='M';spec='1'; }
+  else if(mt.includes('尼龍')||mt.includes('nylon')){ cat='T';type='N';spec='1'; }
+  else if(mt.includes('網布')||mt.includes('mesh')){ cat='T';type='M';spec='1'; }
+  else if(mt.includes('萊卡')||mt.includes('lycra')){ cat='T';type='L';spec='4'; }
+  else if(mt.includes('帆布')){ cat='T';type='C';spec='1'; }
+  else if(mt.includes('提花')){ cat='T';type='J';spec='1'; }
+  else if(mt.includes('針織')){ cat='T';type='K';spec='1'; }
+  else if(mt.includes('布')){ cat='T';type='K';spec='1'; }
+  else if(mt.includes('鞋帶')||mt.includes('lace')){ cat='W';type='L';spec='08'; }
+  else if(mt.includes('鬆緊')||mt.includes('elastic')){ cat='W';type='E';spec='20'; }
+  else if(mt.includes('滾邊')||mt.includes('binding')){ cat='W';type='P';spec='15'; }
+  else if(mt.includes('織帶')||mt.includes('webbing')){ cat='W';type='W';spec='20'; }
+  else if(mt.includes('防水膜')){ cat='A';type='F';spec='10'; }
+  else if(mt.includes('泡棉')||mt.includes('foam')){ cat='A';type='S';spec='30'; }
+  else if(mt.includes('eva')){ cat='A';type='E';spec='30'; }
+  else if(mt.includes('港寶')){ cat='A';type='C';spec='16'; }
+  else if(mt.includes('鞋眼')||mt.includes('eyelet')){ cat='H';type='E';spec='05'; }
+  else if(mt.includes('鉤')||mt.includes('hook')){ cat='H';type='H';spec='10'; }
+  else if(mt.includes('扣')||mt.includes('buckle')){ cat='H';type='B';spec='20'; }
+  else if(mt.includes('拉鍊')||mt.includes('zipper')){ cat='H';type='Z';spec='30'; }
+  else if(mt.includes('大底')||mt.includes('outsole')){ cat='O';type='';spec=''; }
+  return {cat,type,spec};
+}
+function normalizeImportTaxonomy(row, matType, thickness){
+  const auto=autoClassifyImport(matType);
+  const cat=pickImportCategory(row['大類代碼']||row['大類']||row['分類']||'')||auto.cat;
+  if(cat==='O') return {cat,type:'',spec:''};
+  const typeAllowed=MAT[cat]?.types||{};
+  const type=pickImportCode(row['種類代碼']||row['種類']||'',typeAllowed)||
+    (typeAllowed[auto.type]?auto.type:Object.keys(typeAllowed)[0]||'');
+  let spec='';
+  if(['L','S','T'].includes(cat)){
+    const specAllowed=MAT[cat]?.specs||{};
+    spec=pickImportCode(row['規格代碼']||row['規格']||'',specAllowed)||
+      (specAllowed[auto.spec]?auto.spec:Object.keys(specAllowed)[0]||'1');
+  }else{
+    const rawSpec=String(row['規格代碼']||row['規格']||row['規格數值']||thickness||auto.spec||'1').trim();
+    const n=parseInt(String(rawSpec).match(/\d+/)?.[0]||'1',10);
+    spec=String(n).padStart(2,'0').substring(0,2);
+  }
+  return {cat,type,spec};
+}
 async function importExcel(event){
   const file=event.target.files?.[0]; event.target.value='';
   if(!file) return;
@@ -1311,25 +1386,11 @@ async function importExcel(event){
 
         if(!name||!colorCode){ skipped++; return; }
 
-        // Auto classify
-        const mt=matType.toLowerCase();
-        let cat='S',type='M',spec='1';
-        if(mt.includes('反毛')||mt.includes('suede')){ cat='L';type='C';spec='2'; }
-        else if(mt.includes('椰皮')||mt.includes('面皮')){ cat='L';type='C';spec='1'; }
-        else if(mt.includes('皮')&&!mt.includes('人造')&&!mt.includes('pu')){ cat='L';type='C';spec='1'; }
-        else if(mt.includes('超纖')||mt.includes('超件')||mt.includes('仿超')){ cat='S';type='M';spec='1'; }
-        else if(mt.includes('pu')&&mt.includes('濕式')){ cat='S';type='M';spec='2'; }
-        else if(mt.includes('pu')&&mt.includes('霧面')){ cat='S';type='M';spec='3'; }
-        else if(mt.includes('pu')){ cat='S';type='M';spec='1'; }
-        else if(mt.includes('網布')||mt.includes('mesh')){ cat='T';type='M';spec='1'; }
-        else if(mt.includes('萊卡')||mt.includes('lycra')){ cat='T';type='K';spec='4'; }
-        else if(mt.includes('帆布')){ cat='T';type='C';spec='1'; }
-        else if(mt.includes('提花')){ cat='T';type='J';spec='1'; }
-        else if(mt.includes('布')){ cat='T';type='K';spec='1'; }
-        else if(mt.includes('防水膜')){ cat='A';type='F';spec='10'; }
-
-        const prefix=cat+type+spec;
-        const code=nextMaterialCode(prefix,colorCode);
+        const tax=normalizeImportTaxonomy(row,matType,thickness);
+        const cat=tax.cat, type=tax.type, spec=tax.spec;
+        const code=cat==='O'
+          ? (name+(colorCode?'-'+colorCode:''))
+          : nextMaterialCode(cat+type+spec,colorCode);
 
         if(inventory.some(i=>i.code===code)){ skipped++; return; }
 
@@ -1338,7 +1399,8 @@ async function importExcel(event){
 
         const item={
           code, categoryCode:cat, catName:catMap[cat]||'',
-          typeName:matType, specName:spec,
+          typeName:cat==='O'?'大底 Outsole':(MAT[cat]?.types?.[type]||matType||type),
+          specName:['L','S','T'].includes(cat)?(MAT[cat]?.specs?.[spec]||spec):(cat==='O'?'大底尺寸 / '+name:spec),
           colorCode:colorName||colorCode, colorPantone:colorCode,
           currency, price,
           sizeEU:'',sizeUK:'',sizeUS:'',sizeJP:'',
@@ -1367,9 +1429,73 @@ async function importExcel(event){
   reader.readAsArrayBuffer(file);
 }
 
-function downloadTemplate(){
-  window.open('https://raymond626.github.io/peihai-warehouse/材料批量建檔模板.xlsx','_blank');
-  alert('如果下載沒有開始，請到 GitHub 倉庫下載模板檔案。\n\n或聯繫管理員取得最新模板。');
+async function downloadTemplate(){
+  try{
+    await ensureXLSX();
+    const headers=[
+      '大類代碼','種類代碼','規格代碼','品牌','廠商','季別','材料類型','材料名稱',
+      '顏色編碼 (Pantone)','顏色名稱','數量','單位 (SF/YD/PCS/PRS)','厚度',
+      '主倉 (A-T / TEMP)','格 (1-32)','單價','幣別 (TWD/USD/RMB)','備注'
+    ];
+    const templateRows=[
+      ['L','C','2','GEOX','峰昌','FW27','反毛皮 Suede','反毛皮 1.2-1.4','19-0910TPX','咖啡',10,'SF','1.2-1.4','A','1',0,'TWD','皮類範例'],
+      ['S','M','1','EA7','華博','FW27','超纖 Microfiber','超纖 PU 1.4','BLK','黑',6,'YD','1.4','A','2',0,'TWD','人造皮範例'],
+      ['T','N','1','EAM','信泰','FW27','尼龍布 Nylon','尼龍布 210D','NAVY','海軍藍',12,'YD','','A','3',0,'TWD','布類範例'],
+      ['W','W','20','GEOX','協成','FW27','織帶 Webbing','20mm 織帶','BLK','黑',30,'M','20mm','A','4',0,'TWD','條狀類範例'],
+      ['A','E','30','GEOX','材料廠','FW27','EVA','EVA 3.0mm','WHT','白',20,'PCS','3.0mm','A','5',0,'TWD','副料範例；30 = 3.0mm'],
+      ['O','','','GEOX','大底廠','FW27','大底 Outsole','OUTSOLE-STYLE-001','BLK','黑',1,'PRS','','A','6',0,'TWD','大底範例；材料名稱會成為大底編碼'],
+      ['H','E','05','GEOX','五金廠','FW27','鞋眼 Eyelet','5mm 鞋眼','GUN','槍色',100,'PCS','5mm','A','7',0,'TWD','五金範例']
+    ];
+    const data=[headers].concat(templateRows);
+    const ws=XLSX.utils.aoa_to_sheet(data);
+    ws['!cols']=[
+      {wch:10},{wch:10},{wch:10},{wch:12},{wch:14},{wch:12},{wch:18},{wch:24},
+      {wch:18},{wch:14},{wch:10},{wch:18},{wch:12},{wch:18},{wch:10},{wch:10},{wch:18},{wch:28}
+    ];
+
+    const refRows=[['大類代碼','大類','種類代碼','種類','規格代碼','規格 / 填寫標準','建議單位']];
+    const unitByCat={L:'SF',S:'YD',T:'YD',W:'M',A:'PCS',O:'PRS',H:'PCS'};
+    Object.entries(MAT).forEach(([cat,def])=>{
+      if(cat==='O'){
+        refRows.push([cat,def.label,'','','','大底不需種類 / 規格代碼，材料名稱會成為編碼',unitByCat[cat]]);
+        return;
+      }
+      const types=Object.entries(def.types||{});
+      const specs=Object.entries(def.specs||{});
+      if(specs.length){
+        types.forEach(([typeCode,typeName])=>{
+          specs.forEach(([specCode,specName])=>refRows.push([cat,def.label,typeCode,typeName,specCode,specName,unitByCat[cat]]));
+        });
+      }else{
+        types.forEach(([typeCode,typeName])=>{
+          const note=cat==='A'?'副料厚度請填數字：30 = 3.0mm':(cat==='W'||cat==='H'?'請填尺寸數字：20 = 20mm':'請填規格數字');
+          refRows.push([cat,def.label,typeCode,typeName,'數字',note,unitByCat[cat]]);
+        });
+      }
+    });
+    const refWs=XLSX.utils.aoa_to_sheet(refRows);
+    refWs['!cols']=[{wch:10},{wch:18},{wch:10},{wch:22},{wch:10},{wch:34},{wch:10}];
+
+    const noteRows=[
+      ['填寫說明'],
+      ['1. 大類代碼、種類代碼、規格代碼請優先照「分類參考」填，系統會優先用這三欄產生材料編碼。'],
+      ['2. 顏色編碼 (Pantone) 和材料名稱必填；缺少其中一個會跳過該筆。'],
+      ['3. 主倉可填 A-T 或 TEMP；格可填 1-32。沒有入庫位置可先留空。'],
+      ['4. 若不填大類/種類/規格，系統會依「材料類型」文字自動判斷，但建議倉庫批量入庫時填標準代碼。'],
+      ['5. 匯入前可刪除範例列，只保留標題列與要匯入的資料。']
+    ];
+    const noteWs=XLSX.utils.aoa_to_sheet(noteRows);
+    noteWs['!cols']=[{wch:100}];
+
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'匯入模板');
+    XLSX.utils.book_append_sheet(wb,refWs,'分類參考');
+    XLSX.utils.book_append_sheet(wb,noteWs,'填寫說明');
+    XLSX.writeFile(wb,'北海材料批量建檔模板.xlsx');
+  }catch(err){
+    console.error(err);
+    alert('模板下載失敗，請檢查網路後再試');
+  }
 }
 
 // ─── Batch inbound ──────────────────────────────────────────────────
