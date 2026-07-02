@@ -1429,9 +1429,9 @@ async function importExcel(event){
   reader.readAsArrayBuffer(file);
 }
 
-async function downloadTemplate(){
-  try{
-    await ensureXLSX();
+function downloadTemplate(){
+  const buildWorkbook=()=>{
+    if(!window.XLSX) throw new Error('XLSX 尚未載入');
     const headers=[
       '大類代碼','種類代碼','規格代碼','品牌','廠商','季別','材料類型','材料名稱',
       '顏色編碼 (Pantone)','顏色名稱','數量','單位 (SF/YD/PCS/PRS)','厚度',
@@ -1491,7 +1491,22 @@ async function downloadTemplate(){
     XLSX.utils.book_append_sheet(wb,ws,'匯入模板');
     XLSX.utils.book_append_sheet(wb,refWs,'分類參考');
     XLSX.utils.book_append_sheet(wb,noteWs,'填寫說明');
-    XLSX.writeFile(wb,'北海材料批量建檔模板.xlsx');
+    const bytes=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+    const blob=new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download='北海材料批量建檔模板.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1000);
+  };
+  try{
+    if(window.XLSX) buildWorkbook();
+    else ensureXLSX().then(buildWorkbook).catch(err=>{
+      console.error(err);
+      alert('模板下載失敗，請檢查網路後再試');
+    });
   }catch(err){
     console.error(err);
     alert('模板下載失敗，請檢查網路後再試');
