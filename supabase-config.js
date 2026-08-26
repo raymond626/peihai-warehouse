@@ -7,6 +7,21 @@ window.PEIHAI_SUPABASE_CONFIG = {
 document.addEventListener('DOMContentLoaded', function(){
     var pageSize = 1000;
 
+    if(typeof MAT !== 'undefined' && MAT.L && MAT.L.specs){
+        MAT.L.specs[10] = '壓紋 Embossed / 荔枝紋 Pebble Grain';
+    }
+
+    if(typeof autoClassifyImport === 'function'){
+        var originalAutoClassifyImport = autoClassifyImport;
+        autoClassifyImport = function(matType){
+            var mt = String(matType || '').toLowerCase();
+            if(mt.includes('荔枝紋') || mt.includes('壓紋') || mt.includes('emboss') || mt.includes('pebble')){
+                return {cat:'L', type:'C', spec:'10'};
+            }
+            return originalAutoClassifyImport(matType);
+        };
+    }
+
     async function fetchAllMaterialsCloud(){
         var rows = [];
         for(var from = 0;; from += pageSize){
