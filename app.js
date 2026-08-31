@@ -1844,7 +1844,7 @@ async function printSelectedQR(){
     }
     .sheet:last-child{page-break-after:auto;break-after:auto;}
     .label{
-      width:43.75mm;height:64.5mm;border:0.35mm solid #000;border-radius:2mm;
+      width:43.75mm;height:64.5mm;border:0;border-radius:0;
       padding:3mm;text-align:center;overflow:hidden;page-break-inside:avoid;break-inside:avoid;
       display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
     }
