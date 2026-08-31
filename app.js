@@ -1818,25 +1818,50 @@ async function printSelectedQR(){
     return `<div class="label">
       <h2>北海企業樣品室</h2>
       <div class="code">${esc(item.code)}</div>
-      <p>${esc(item.productName||'')}</p>
+      <p class="name">${esc(item.productName||'')}</p>
       ${getOutsoleSize(item)?`<p>${esc(getOutsoleSize(item))}</p>`:''}
-      <p>${esc(item.catName?.split(' ')[0]||'')} — ${esc(item.specName||'')} ${item.colorCode?'/ '+item.colorCode:''}</p>
+      <p>${esc(item.catName?.split(' ')[0]||'')} - ${esc(item.specName||'')} ${item.colorCode?'/ '+item.colorCode:''}</p>
       ${item.thickness?`<p>厚度：${esc(item.thickness)}</p>`:''}
       <p>廠商：${esc(item.vendor||'')}</p>
       <p>儲位：${esc(item.locationCode||'尚未入庫')}</p>
       ${qr?`<img src="${qr}" alt="QR">`:''}
     </div>`;
-  }).join('');
+  });
+  const sheets=[];
+  for(let i=0;i<labels.length;i+=16){
+    sheets.push(`<section class="sheet">${labels.slice(i,i+16).join('')}</section>`);
+  }
   w.document.write(`<html><head><title>批量 QR 列印</title><style>
-    body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:12px;}
-    .sheet{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
-    .label{border:2px solid #000;border-radius:8px;padding:10px;page-break-inside:avoid;}
-    h2{text-align:center;font-size:13px;border-bottom:1.5px solid #000;padding-bottom:5px;margin:0 0 6px;}
-    .code{text-align:center;font-family:monospace;font-size:16px;font-weight:900;margin:4px 0;}
-    p{margin:2px 0;font-size:12px;font-weight:600;}
-    img{display:block;width:100px;height:100px;margin:8px auto 0;}
-    @media print{body{margin:6mm;}.sheet{gap:6px;}}
-  </style></head><body><div class="sheet">${labels}</div>
+    @page{size:A4 portrait;margin:0;}
+    *{box-sizing:border-box;}
+    html,body{width:210mm;min-height:297mm;margin:0;padding:0;}
+    body{font-family:'Microsoft JhengHei',Arial,sans-serif;background:#f4f4f4;color:#000;}
+    .sheet{
+      width:184mm;height:267mm;margin:15mm auto;background:#fff;
+      display:grid;grid-template-columns:repeat(4,43.75mm);grid-template-rows:repeat(4,64.5mm);
+      gap:3mm;align-content:center;justify-content:center;
+      page-break-after:always;break-after:page;
+    }
+    .sheet:last-child{page-break-after:auto;break-after:auto;}
+    .label{
+      width:43.75mm;height:64.5mm;border:0.35mm solid #000;border-radius:2mm;
+      padding:3mm;text-align:center;overflow:hidden;page-break-inside:avoid;break-inside:avoid;
+      display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+    }
+    h2{
+      width:100%;font-size:8pt;line-height:1.1;text-align:center;
+      border-bottom:0.25mm solid #000;padding-bottom:0.8mm;margin:0 0 1mm;font-weight:900;
+    }
+    .code{width:100%;font-family:monospace;font-size:10pt;line-height:1.1;font-weight:900;margin:0 0 0.8mm;}
+    p{
+      width:100%;margin:0.35mm 0;font-size:7.5pt;line-height:1.15;font-weight:700;
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+    .name{font-size:8pt;}
+    img{display:block;width:24mm;height:24mm;margin:1.8mm auto 0;flex:0 0 auto;}
+    @media screen{.sheet{box-shadow:0 0 0 1px #ddd,0 10px 30px rgba(0,0,0,.12);}}
+    @media print{body{background:#fff;}.sheet{box-shadow:none;}}
+  </style></head><body>${sheets.join('')}
   <script>setTimeout(()=>{window.print();},500);<\/script>`);
   w.document.close();
 }
