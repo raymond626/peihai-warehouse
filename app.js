@@ -42,8 +42,9 @@ const DB_NAME = 'Peihai_WMS_DB_V26';
 const BACKUP_FILE = 'peihai-inventory-backup.json';
 const PHOTO_PLACEHOLDER='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 const LIBS = {
-  qr: 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
-  xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+  qr: 'qrcode.min.js?v=1.0.0',
+  xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+  jsqr: 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js'
 };
 const scriptLoads = {};
 
@@ -116,7 +117,13 @@ function loadScript(src, globalName){
     const s=document.createElement('script');
     s.src=src;
     s.async=true;
+    const timer=setTimeout(()=>{
+      s.remove();
+      delete scriptLoads[src];
+      reject(new Error(src+' 載入逾時'));
+    },12000);
     s.onload=()=>{
+      clearTimeout(timer);
       if(globalName&&!window[globalName]){
         delete scriptLoads[src];
         reject(new Error(globalName+' 載入失敗'));
@@ -125,6 +132,7 @@ function loadScript(src, globalName){
       resolve();
     };
     s.onerror=()=>{
+      clearTimeout(timer);
       delete scriptLoads[src];
       reject(new Error(src+' 載入失敗'));
     };
@@ -134,6 +142,7 @@ function loadScript(src, globalName){
 }
 function ensureQRCode(){ return loadScript(LIBS.qr,'QRCode'); }
 function ensureXLSX(){ return loadScript(LIBS.xlsx,'XLSX'); }
+function ensureJsQR(){ return loadScript(LIBS.jsqr,'jsQR'); }
 function getStatus(item){
   if(item.status&&item.status.includes('Pending')) return 'pending';
   if(item.status&&(item.status.includes('耗盡')||item.status.includes('Empty'))) return 'empty';
@@ -892,31 +901,118 @@ function closeImgPreview(){ document.getElementById('imgPreviewBackdrop').classL
 
 // ─── Camera scanner ───────────────────────────────────────────────────
 async function startCamera(targetId){
-  if(!('BarcodeDetector' in window)){ alert('此瀏覽器不支援相機掃碼，請用掃碼槍或手動輸入'); return; }
+  scannerTargetId=targetId;
+  const canUseCamera=navigator.mediaDevices&&navigator.mediaDevices.getUserMedia;
+  if(!canUseCamera){ startImageQRScan(targetId); return; }
   try{
-    scannerTargetId=targetId; scannerActive=true;
+    scannerActive=true;
     document.getElementById('cameraModal').classList.add('open');
     const video=document.getElementById('scannerVideo');
     scannerStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
     video.srcObject=scannerStream;
     await video.play();
+    if(!('BarcodeDetector' in window)) await ensureJsQR();
     scanFrame();
-  }catch(e){ stopCamera(); alert('無法開啟相機，請確認權限'); }
+  }catch(e){
+    stopCamera();
+    alert('無法開啟相機，請確認 Safari 相機權限，或改用掃碼槍／手動輸入');
+  }
+}
+function applyScannedCode(val){
+  const code=String(val||'').trim().toUpperCase();
+  const target=document.getElementById(scannerTargetId);
+  if(!target||!code) return false;
+  target.value=code;
+  if(scannerTargetId==='batchInput') addToBatch();
+  return true;
+}
+function startImageQRScan(targetId){
+  scannerTargetId=targetId;
+  let input=document.getElementById('qrImageInput');
+  if(!input){
+    input=document.createElement('input');
+    input.type='file';
+    input.id='qrImageInput';
+    input.accept='image/*';
+    input.capture='environment';
+    input.style.display='none';
+    document.body.appendChild(input);
+  }
+  input.value='';
+  input.onchange=async()=>{
+    const file=input.files&&input.files[0];
+    if(!file) return;
+    try{
+      await ensureJsQR();
+      const code=await decodeQRFromImageFile(file);
+      if(!applyScannedCode(code)) alert('照片中讀不到 QR Code，請靠近一點重新拍一次');
+    }catch(e){
+      console.warn('Image QR scan failed',e);
+      alert('照片掃碼失敗，請用掃碼槍或手動輸入');
+    }
+  };
+  input.click();
+}
+function decodeQRFromImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    const url=URL.createObjectURL(file);
+    const cleanup=()=>URL.revokeObjectURL(url);
+    img.onload=()=>{
+      try{
+        const maxSide=1800;
+        const scale=Math.min(1,maxSide/Math.max(img.naturalWidth||img.width,img.naturalHeight||img.height));
+        const width=Math.max(1,Math.round((img.naturalWidth||img.width)*scale));
+        const height=Math.max(1,Math.round((img.naturalHeight||img.height)*scale));
+        const canvas=document.createElement('canvas');
+        canvas.width=width; canvas.height=height;
+        const ctx=canvas.getContext('2d',{willReadFrequently:true});
+        ctx.drawImage(img,0,0,width,height);
+        const data=ctx.getImageData(0,0,width,height);
+        const found=window.jsQR(data.data,width,height,{inversionAttempts:'attemptBoth'});
+        cleanup();
+        resolve(found&&found.data?found.data:'');
+      }catch(e){ cleanup(); reject(e); }
+    };
+    img.onerror=()=>{ cleanup(); reject(new Error('圖片讀取失敗')); };
+    img.src=url;
+  });
 }
 async function scanFrame(){
   if(!scannerActive) return;
   const video=document.getElementById('scannerVideo');
   if(video.readyState>=2){
     try{
-      const codes=await new BarcodeDetector({formats:['qr_code']}).detect(video);
-      if(codes.length>0){
-        const val=(codes[0].rawValue||'').trim();
-        const target=document.getElementById(scannerTargetId);
-        if(target&&val){ target.value=val.toUpperCase(); stopCamera(); if(scannerTargetId==='batchInput') addToBatch(); return; }
+      let val='';
+      if('BarcodeDetector' in window){
+        const codes=await new BarcodeDetector({formats:['qr_code']}).detect(video);
+        if(codes.length>0) val=(codes[0].rawValue||'').trim();
+      }else if(window.jsQR){
+        val=detectQRFromVideo(video);
       }
+      if(applyScannedCode(val)){ stopCamera(); return; }
     }catch(e){ stopCamera(); return; }
   }
   requestAnimationFrame(scanFrame);
+}
+function detectQRFromVideo(video){
+  const vw=video.videoWidth||0, vh=video.videoHeight||0;
+  if(!vw||!vh) return '';
+  if(!detectQRFromVideo.canvas){
+    detectQRFromVideo.canvas=document.createElement('canvas');
+    detectQRFromVideo.ctx=detectQRFromVideo.canvas.getContext('2d',{willReadFrequently:true});
+  }
+  const maxSide=900;
+  const scale=Math.min(1,maxSide/Math.max(vw,vh));
+  const width=Math.max(1,Math.round(vw*scale));
+  const height=Math.max(1,Math.round(vh*scale));
+  const canvas=detectQRFromVideo.canvas;
+  const ctx=detectQRFromVideo.ctx;
+  canvas.width=width; canvas.height=height;
+  ctx.drawImage(video,0,0,width,height);
+  const data=ctx.getImageData(0,0,width,height);
+  const found=window.jsQR(data.data,width,height,{inversionAttempts:'attemptBoth'});
+  return found&&found.data?found.data.trim():'';
 }
 function stopCamera(){
   scannerActive=false;
@@ -1762,14 +1858,71 @@ async function confirmDelete(){
   renderAll();
 }
 
+// ─── Print helpers ────────────────────────────────────────────────────
+function printPreviewStyles(){
+  return `
+    .print-toolbar{
+      position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:center;
+      gap:12px;padding:12px;background:#fff;border-bottom:1px solid #ddd;
+      font-family:'Microsoft JhengHei',Arial,sans-serif;
+    }
+    .print-toolbar button{
+      appearance:none;border:0;border-radius:6px;background:#111;color:#fff;
+      padding:10px 22px;font-size:16px;font-weight:800;cursor:pointer;
+    }
+    .print-toolbar span{font-size:13px;color:#444;}
+    @media print{.print-toolbar{display:none!important;}}
+    @media(max-width:640px){
+      .print-toolbar{align-items:stretch;flex-direction:column;text-align:center;}
+      .print-toolbar button{width:100%;font-size:18px;}
+    }
+  `;
+}
+function printPreviewToolbar(){
+  return `<div class="print-toolbar">
+    <button type="button" onclick="window.print()">列印</button>
+    <span>如果沒有自動開啟列印視窗，請按這個按鈕。</span>
+  </div>`;
+}
+function printPreviewAutoScript(){
+  return `<script>(()=>{
+    const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+    if(!isIOS) window.addEventListener('load',()=>setTimeout(()=>window.print(),600),{once:true});
+  })();<\/script>`;
+}
+function openPrintPreview(title,features){
+  const w=window.open('','_blank',features);
+  if(!w){
+    alert('瀏覽器已阻擋列印預覽。請允許此網站開啟彈出式視窗後再試。');
+    return null;
+  }
+  w.document.open();
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>
+    body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;color:#222;}
+    .loading{text-align:center;padding:32px;} .loading strong{display:block;font-size:20px;margin-bottom:8px;}
+  </style></head><body><div class="loading"><strong>正在準備列印內容…</strong><span>請稍候，不要關閉此分頁。</span></div></body></html>`);
+  w.document.close();
+  return w;
+}
+function showPrintPreviewError(w){
+  if(!w||w.closed) return;
+  w.document.open();
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>列印準備失敗</title><style>
+    body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;color:#222;}
+    .error{text-align:center;padding:32px;} button{border:0;border-radius:6px;background:#111;color:#fff;padding:10px 22px;font-size:16px;cursor:pointer;}
+  </style></head><body><div class="error"><h1>列印內容準備失敗</h1><p>請檢查網路後關閉此分頁，再回原頁重試。</p><button onclick="window.close()">關閉</button></div></body></html>`);
+  w.document.close();
+}
+
 // ─── Print label ──────────────────────────────────────────────────────
 async function printLabel(){
   const item=inventory.find(i=>i.code===currentDetailCode); if(!item) return;
-  const w=window.open('','_blank','width=500,height=560');
-  if(!w){ alert('請允許彈出視窗後再列印'); return; }
-  try{ await ensureQRCode(); }catch(e){ alert('QR 功能載入失敗，請檢查網路後再試'); w.close(); return; }
+  const w=openPrintPreview(item.code,'width=500,height=560');
+  if(!w) return;
+  try{ await ensureQRCode(); }catch(e){ showPrintPreviewError(w); return; }
   const qrCanvas=document.querySelector('#detailQR canvas');
   const qrImg=qrCanvas?qrCanvas.toDataURL():createQRData(item.code);
+  w.document.open();
   w.document.write(`<html><head><title>${item.code}</title><style>
     body{font-family:'Microsoft JhengHei',Arial,sans-serif;margin:16px;font-size:13px;}
     .card{border:2px solid #000;border-radius:8px;padding:14px;max-width:320px;}
@@ -1777,8 +1930,9 @@ async function printLabel(){
     .code{text-align:center;font-family:monospace;font-size:17px;font-weight:900;margin:6px 0;}
     p{margin:3px 0;font-weight:600;}
     img{display:block;width:110px;height:110px;margin:8px auto 0;}
+    ${printPreviewStyles()}
     @media print{body{margin:5mm;}}
-  </style></head><body><div class="card">
+  </style></head><body>${printPreviewToolbar()}<div class="card">
     <h2>北海企業樣品室</h2>
     <div class="code">${esc(item.code)}</div>
     <p>材料：${esc(item.productName||'')}</p>
@@ -1788,7 +1942,7 @@ async function printLabel(){
     <p>廠商：${esc(item.vendor||'')}</p>
     <p>儲位：${esc(item.locationCode||'尚未入庫')}</p>
     ${qrImg?`<img src="${qrImg}" alt="QR">`:''}
-  </div><script>setTimeout(()=>{window.print();window.close();},600);<\/script>`);
+  </div>${printPreviewAutoScript()}`);
   w.document.close();
 }
 
@@ -1810,9 +1964,9 @@ async function printSelectedQR(){
   const codes=Array.from(document.querySelectorAll('.print-chk:checked')).map(c=>c.value);
   if(!codes.length){ alert('請先勾選要列印 QR Code 的材料'); return; }
   const items=codes.map(c=>inventory.find(i=>i.code===c)).filter(Boolean);
-  const w=window.open('','_blank','width=900,height=700');
-  if(!w){ alert('請允許彈出視窗後再列印'); return; }
-  try{ await ensureQRCode(); }catch(e){ alert('QR 功能載入失敗，請檢查網路後再試'); w.close(); return; }
+  const w=openPrintPreview('批量 QR 列印','width=900,height=700');
+  if(!w) return;
+  try{ await ensureQRCode(); }catch(e){ showPrintPreviewError(w); return; }
   const labels=items.map(item=>{
     const qr=createQRData(item.code);
     return `<div class="label">
@@ -1831,22 +1985,23 @@ async function printSelectedQR(){
   for(let i=0;i<labels.length;i+=16){
     sheets.push(`<section class="sheet">${labels.slice(i,i+16).join('')}</section>`);
   }
+  w.document.open();
   w.document.write(`<html><head><title>批量 QR 列印</title><style>
     @page{size:A4 portrait;margin:0;}
     *{box-sizing:border-box;}
     html,body{width:210mm;min-height:297mm;margin:0;padding:0;}
     body{font-family:'Microsoft JhengHei',Arial,sans-serif;background:#f4f4f4;color:#000;}
     .sheet{
-      width:184mm;height:267mm;margin:15mm auto;background:#fff;
-      display:grid;grid-template-columns:repeat(4,43.75mm);grid-template-rows:repeat(4,64.5mm);
-      gap:3mm;align-content:center;justify-content:center;
+      width:210mm;height:297mm;margin:0 auto;background:#fff;
+      display:grid;grid-template-columns:repeat(4,52.5mm);grid-template-rows:repeat(4,74.25mm);
+      gap:0;align-content:start;justify-content:start;
       page-break-after:always;break-after:page;
     }
     .sheet:last-child{page-break-after:auto;break-after:auto;}
     .label{
-      width:43.75mm;height:64.5mm;border:0;border-radius:0;
-      padding:3mm;text-align:center;overflow:hidden;page-break-inside:avoid;break-inside:avoid;
-      display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+      width:52.5mm;height:74.25mm;border:0;border-radius:0;
+      padding:6mm 5mm;text-align:center;overflow:hidden;page-break-inside:avoid;break-inside:avoid;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
     }
     h2{
       width:100%;font-size:8pt;line-height:1.1;text-align:center;
@@ -1858,11 +2013,12 @@ async function printSelectedQR(){
       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
     }
     .name{font-size:8pt;}
-    img{display:block;width:24mm;height:24mm;margin:1.8mm auto 0;flex:0 0 auto;}
+    img{display:block;width:25mm;height:25mm;margin:2mm auto 0;flex:0 0 auto;}
+    ${printPreviewStyles()}
     @media screen{.sheet{box-shadow:0 0 0 1px #ddd,0 10px 30px rgba(0,0,0,.12);}}
     @media print{body{background:#fff;}.sheet{box-shadow:none;}}
-  </style></head><body>${sheets.join('')}
-  <script>setTimeout(()=>{window.print();},500);<\/script>`);
+  </style></head><body>${printPreviewToolbar()}${sheets.join('')}
+  ${printPreviewAutoScript()}`);
   w.document.close();
 }
 
@@ -2215,19 +2371,22 @@ function renderSearch(){
 function printSearchResult(){
   const tbody=document.getElementById('srBody');
   if(!tbody) return;
-  const w=window.open('','_blank','width=1200,height=800');
+  const w=openPrintPreview('材料總表列印','width=1200,height=800');
+  if(!w) return;
+  w.document.open();
   w.document.write(`<html><head><title>材料總表列印</title><style>
     body{font-family:'Microsoft JhengHei',Arial,sans-serif;font-size:12px;margin:10mm;}
     h1{font-size:16px;margin-bottom:8px;} .sub{color:#666;font-size:11px;margin-bottom:12px;}
     table{width:100%;border-collapse:collapse;} th,td{border:1px solid #ccc;padding:5px 7px;text-align:left;font-size:11px;}
     th{background:#f5f5f5;font-weight:700;} tr:nth-child(even) td{background:#fafafa;}
+    ${printPreviewStyles()}
     @media print{body{margin:8mm;}}
-  </style></head><body>
+  </style></head><body>${printPreviewToolbar()}
   <h1>北海企業樣品室 — 材料總表</h1>
   <div class="sub">列印時間：${now()} ／ 共 ${document.getElementById('srCount')?.textContent||0} 筆</div>
   <table><thead><tr><th>材料名稱</th><th>編碼</th><th>大類</th><th>規格</th><th>庫存</th><th>儲位</th><th>廠商</th><th>品牌</th><th>狀態</th></tr></thead>
   <tbody>${tbody.innerHTML.replace(/<img[^>]*>/g,'').replace(/<div class="mat-name">/g,'').replace(/<\/div>/g,'').replace(/class="[^"]*"/g,'')}</tbody>
-  </table><script>setTimeout(()=>{window.print();},500);<\/script>`);
+  </table>${printPreviewAutoScript()}`);
   w.document.close();
 }
 
